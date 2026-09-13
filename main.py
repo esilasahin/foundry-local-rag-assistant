@@ -1,48 +1,61 @@
-from foundry_local_sdk import Configuration, FoundryLocalManager
+import argparse
+
+from rag import config, db
+from rag.foundry_client import FoundryClient
+from rag.ingest import run_ingestion
+from rag.qa import answer_query
 
 
-MODEL_NAME = "phi-4-mini"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Offline local RAG assistant powered by Microsoft Foundry Local."
+    )
+    parser.add_argument(
+        "--reingest",
+        action="store_true",
+        help="Re-run document ingestion even if the database already has data.",
+    )
+    return parser.parse_args()
 
 
 def main():
-    print("Foundry Local RAG Assistant başlatılıyor...")
+    args = parse_args()
 
-    config = Configuration(app_name="foundry_local_rag_assistant")
-    FoundryLocalManager.initialize(config)
-    manager = FoundryLocalManager.instance
-
-    model = manager.catalog.get_model(MODEL_NAME)
-
-    print("Model hazırlanıyor...")
-    model.download()
-    model.load()
-
+    print("Starting Foundry Local RAG Assistant...")
+    foundry_client = None
     try:
-        client = model.get_chat_client()
+        foundry_client = FoundryClient()
+        foundry_client.load()
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Sen Türkçe cevap veren yardımcı bir yapay zekâ asistanısın. "
-                    "Cevaplarını kısa, açık ve anlaşılır şekilde ver."
-                ),
-            },
-            {
-                "role": "user",
-                "content": "RAG nedir? Tek paragrafta açıkla.",
-            },
-        ]
+        db.init_db()
+        chunk_count = db.count_chunks()
+        if args.reingest or chunk_count == 0:
+            print(f"Ingesting documents from {config.DOCUMENTS_DIR}...")
+            chunk_count = run_ingestion(foundry_client)
+            print(f"Ingested {chunk_count} chunk(s).")
+        else:
+            print(f"Using existing knowledge base ({chunk_count} chunk(s)).")
 
-        response = client.complete_chat(messages)
-        answer = response.choices[0].message.content
+        print("\nAssistant ready. Ask a question, or type 'exit' to quit.\n")
+        while True:
+            question = input("You: ").strip()
+            if not question:
+                continue
+            if question.lower() in {"exit", "quit"}:
+                break
 
-        print("\nModelin cevabı:")
-        print(answer)
+            try:
+                answer = answer_query(foundry_client, question)
+            except Exception as exc:
+                print(f"\nSorry, something went wrong answering that: {exc}\n")
+                continue
+
+            print(f"\nAssistant: {answer}\n")
 
     finally:
-        model.unload()
-        print("\nModel GPU belleğinden çıkarıldı.")
+        if foundry_client is not None:
+            foundry_client.unload()
+            print("Models unloaded. Goodbye.")
 
 
 if __name__ == "__main__":
